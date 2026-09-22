@@ -1,8 +1,13 @@
 # src/feature_extraction.py
 import os
 import re
+from pathlib import Path
 import pandas as pd
 import numpy as np
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_RAW_DIR = PROJECT_ROOT / "data" / "raw"
+DEFAULT_OUTPUT_PATH = PROJECT_ROOT / "data" / "processed" / "user_daily_features.csv"
 
 SUSPICIOUS_KEYWORDS = [
     r'confidential', r'proprietary', r'salary', r'leak',
@@ -26,15 +31,44 @@ def analyze_nlp_intent(text_series: pd.Series) -> pd.DataFrame:
         
     return pd.DataFrame({'lexical_risk_score': scores, 'flagged_terms': term_counts})
 
-def build_feature_matrix(raw_dir="data/raw", output_path="data/processed/user_daily_features.csv"):
+def _read_and_validate(path: Path, required_columns: set[str]) -> pd.DataFrame:
+    if not path.exists():
+        raise FileNotFoundError(f"Required telemetry feed not found: {path}")
+    frame = pd.read_csv(path)
+    missing = required_columns.difference(frame.columns)
+    if missing:
+        raise ValueError(f"{path.name} is missing required columns: {sorted(missing)}")
+    if frame.empty:
+        raise ValueError(f"{path.name} contains no telemetry rows")
+    timestamps = pd.to_datetime(frame["timestamp"], errors="coerce", utc=True)
+    if timestamps.isna().any():
+        raise ValueError(f"{path.name} contains invalid timestamps")
+    if frame["user"].isna().any() or frame["user"].astype(str).str.strip().eq("").any():
+        raise ValueError(f"{path.name} contains blank user identifiers")
+    frame["timestamp"] = timestamps.dt.tz_convert(None)
+    return frame
+
+
+def build_feature_matrix(raw_dir=DEFAULT_RAW_DIR, output_path=DEFAULT_OUTPUT_PATH):
     """
     Aggregates logon, device, file, and text logs into normalized daily user vectors.
     """
     print("Ingesting raw data feeds...")
-    logon_df = pd.read_csv(f"{raw_dir}/logon.csv")
-    device_df = pd.read_csv(f"{raw_dir}/device.csv")
-    file_df = pd.read_csv(f"{raw_dir}/file.csv")
-    text_df = pd.read_csv(f"{raw_dir}/text.csv")
+    raw_dir = Path(raw_dir)
+    output_path = Path(output_path)
+    logon_df = _read_and_validate(raw_dir / "logon.csv", {"timestamp", "user", "activity", "pc"})
+    device_df = _read_and_validate(raw_dir / "device.csv", {"timestamp", "user", "activity"})
+    file_df = _read_and_validate(raw_dir / "file.csv", {"timestamp", "user", "filename", "to_removable_media"})
+    text_df = _read_and_validate(raw_dir / "text.csv", {"timestamp", "user", "content"})
+
+    if not logon_df["activity"].isin({"Logon", "Logoff"}).all():
+        raise ValueError("logon.csv contains unsupported activity values")
+    if not device_df["activity"].isin({"Connect"}).all():
+        raise ValueError("device.csv contains unsupported activity values")
+    removable_values = pd.to_numeric(file_df["to_removable_media"], errors="coerce")
+    if removable_values.isna().any() or ~removable_values.isin({0, 1}).all():
+        raise ValueError("file.csv to_removable_media must contain only 0 or 1")
+    file_df["to_removable_media"] = removable_values
 
     # 1. Process Logon & Temporal Activity
     logon_df['timestamp'] = pd.to_datetime(logon_df['timestamp'])
@@ -93,7 +127,7 @@ def build_feature_matrix(raw_dir="data/raw", output_path="data/processed/user_da
     # Sort chronological profile
     merged.sort_values(by=['user', 'date'], inplace=True)
 
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    os.makedirs(output_path.parent, exist_ok=True)
     merged.to_csv(output_path, index=False)
     print(f"Feature matrix successfully constructed: {merged.shape[0]} rows, {merged.shape[1]} features.")
     print(f"Saved to: {output_path}")

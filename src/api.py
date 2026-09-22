@@ -7,24 +7,41 @@ Now backed by SQLite with CSV fallback for backward compatibility.
 """
 import os
 import json
+import logging
 from pathlib import Path
 import pandas as pd
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from fastapi import Depends, FastAPI, Header, HTTPException, Path as ApiPath
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+from typing import Literal
+
+from src.config import settings
+
+logger = logging.getLogger("cognishield.api")
 
 app = FastAPI(
     title="CogniShield Threat Intelligence API",
     description="REST API for batch insider threat results, explainable risk attribution, and user risk retrieval.",
-    version="1.1.0"
+    version="1.1.0",
+    docs_url=None if settings.is_production else "/docs",
+    redoc_url=None if settings.is_production else "/redoc",
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DB_PATH = str(PROJECT_ROOT / "data" / "cognishield.db")
-FEED_PATH = str(PROJECT_ROOT / "data" / "processed" / "threat_intelligence_feed.csv")
+DB_PATH = str(settings.database_path)
+FEED_PATH = str(settings.feed_path)
+
+
+def require_api_token(authorization: str | None = Header(default=None)) -> None:
+    """Require a configured bearer token outside local development."""
+    if settings.environment == "development" and not settings.api_token:
+        return
+    expected = settings.api_token
+    if not expected or authorization != f"Bearer {expected}":
+        raise HTTPException(status_code=401, detail="Valid bearer token required")
 
 
 def get_telemetry_data():
-    """Load threat intelligence data from SQLite (preferred) or CSV (fallback)."""
+    """Load threat intelligence data from SQLite, with explicit fallback only."""
     # Prefer SQLite
     if os.path.exists(DB_PATH):
         from src.database import query_all_threats
@@ -32,7 +49,8 @@ def get_telemetry_data():
         if not df.empty:
             return df
 
-    # Fallback to CSV
+    if not settings.allow_csv_fallback:
+        raise HTTPException(status_code=503, detail="Threat intelligence database is unavailable")
     if not os.path.exists(FEED_PATH):
         raise HTTPException(
             status_code=404,
@@ -41,7 +59,7 @@ def get_telemetry_data():
     return pd.read_csv(FEED_PATH)
 
 
-@app.get("/")
+@app.get("/", dependencies=[Depends(require_api_token)])
 def root():
     return {
         "status": "online",
@@ -51,7 +69,19 @@ def root():
     }
 
 
-@app.get("/api/v1/alerts/high-risk")
+@app.get("/healthz")
+def healthz():
+    return {"status": "ok"}
+
+
+@app.get("/readyz", dependencies=[Depends(require_api_token)])
+def readyz():
+    if not os.path.exists(DB_PATH):
+        raise HTTPException(status_code=503, detail="Threat intelligence database is unavailable")
+    return {"status": "ready", "database": DB_PATH}
+
+
+@app.get("/api/v1/alerts/high-risk", dependencies=[Depends(require_api_token)])
 def get_high_risk_alerts():
     """Returns all incidents flagged as High Risk."""
     df = get_telemetry_data()
@@ -62,8 +92,8 @@ def get_high_risk_alerts():
     }
 
 
-@app.get("/api/v1/user/{user_id}")
-def get_user_risk_history(user_id: str):
+@app.get("/api/v1/user/{user_id}", dependencies=[Depends(require_api_token)])
+def get_user_risk_history(user_id: str = ApiPath(pattern=r"^USER_[0-9]{3}$", max_length=8)):
     """Retrieves full longitudinal threat profile for a specific user entity."""
     df = get_telemetry_data()
     user_records = df[df['user'] == user_id.upper()]
@@ -79,8 +109,8 @@ def get_user_risk_history(user_id: str):
     }
 
 
-@app.get("/api/v1/user/{user_id}/explain")
-def get_user_risk_explanation(user_id: str):
+@app.get("/api/v1/user/{user_id}/explain", dependencies=[Depends(require_api_token)])
+def get_user_risk_explanation(user_id: str = ApiPath(pattern=r"^USER_[0-9]{3}$", max_length=8)):
     """
     Returns SHAP feature attribution breakdown for a user's highest-risk assessment.
     Shows which behavioral features contributed most to the risk score.
@@ -149,24 +179,23 @@ def _build_explanation_summary(user_id, record, sorted_attrs, labels):
 
 
 class EscalationRequest(BaseModel):
-    user_id: str
-    action: str  # e.g., "LOCK_ACCOUNT", "REVOKE_USB_ACCESS", "REQUIRE_MFA"
+    model_config = ConfigDict(extra="forbid")
+    user_id: str = Field(pattern=r"^USER_[0-9]{3}$", max_length=8)
+    action: Literal["LOCK_ACCOUNT", "REVOKE_USB_ACCESS", "REQUIRE_MFA"]
 
-@app.post("/api/v1/mitigate")
+    @field_validator("user_id", "action", mode="before")
+    @classmethod
+    def normalize_fields(cls, value: str) -> str:
+        return value.strip().upper()
+
+@app.post("/api/v1/mitigate", dependencies=[Depends(require_api_token)])
 def trigger_mitigation(request: EscalationRequest):
     """Validate a requested action without executing an access control."""
-    allowed_actions = {"LOCK_ACCOUNT", "REVOKE_USB_ACCESS", "REQUIRE_MFA"}
-    action = request.action.upper()
-    if action not in allowed_actions:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unsupported mitigation action. Choose one of: {', '.join(sorted(allowed_actions))}.",
-        )
-
+    logger.warning("Mitigation simulation requested for %s: %s", request.user_id, request.action)
     return {
         "status": "simulation",
         "user_id": request.user_id.upper(),
-        "action_requested": action,
+        "action_requested": request.action,
         "action_executed": False,
         "message": "No access control was changed. This endpoint records a validated simulation request only."
     }

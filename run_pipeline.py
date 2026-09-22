@@ -21,7 +21,7 @@ from src.models import (
     compute_shap_attributions,
 )
 from src.risk_engine import CogniShieldRiskEngine
-from src.database import init_database, store_features, store_threat_feed
+from src.database import init_database, store_pipeline_results
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 FEATURES_PATH = PROJECT_ROOT / "data" / "processed" / "user_daily_features.csv"
@@ -56,10 +56,6 @@ def main():
         'total_logons', 'total_logoffs', 'after_hours_logons', 'weekend_logons',
         'usb_connects', 'files_accessed', 'files_copied_external'
     ]
-
-    # Store features in SQLite
-    store_features(df, db_path)
-    print(f"[+] Feature matrix persisted to SQLite ({db_path})")
 
     # 2. Normalize Numerical Matrix
     scaler = MinMaxScaler()
@@ -117,9 +113,9 @@ def main():
     scored_df.to_csv(output_feed, index=False)
     print(f"[+] Risk intelligence feed exported to CSV ({output_feed})")
 
-    # Persist to SQLite
-    store_threat_feed(scored_df, db_path)
-    print(f"[+] Risk intelligence feed persisted to SQLite ({db_path})")
+    # Persist both tables atomically as one pipeline generation.
+    store_pipeline_results(df, scored_df, db_path)
+    print(f"[+] Feature matrix and threat intelligence feed persisted atomically to SQLite ({db_path})")
 
     # Summary of High Risk Alerts
     high_risks = scored_df[scored_df['risk_level'] == 'High']

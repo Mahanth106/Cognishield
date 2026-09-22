@@ -56,3 +56,28 @@ The dashboard is normally available at `http://localhost:8501/`.
 ## Current scope
 
 This is a proof-of-concept using synthetic data and batch scoring. The mitigation endpoint validates and records simulation requests; it does not change accounts or access controls. Authentication, authorization, production model evaluation, and encrypted database storage are not included yet.
+
+## Production runtime configuration
+
+The API requires a bearer token outside development mode. Set these environment variables before starting a production process:
+
+```powershell
+$env:COGNISHIELD_ENV = "production"
+$env:COGNISHIELD_API_TOKEN = "replace-with-a-secret-from-your-secret-manager"
+$env:COGNISHIELD_ALLOW_CSV_FALLBACK = "false"
+python -m uvicorn src.api:app --host 0.0.0.0 --port 8000
+```
+
+Send the token as:
+
+```text
+Authorization: Bearer <token>
+```
+
+The `/healthz` endpoint is intentionally public for liveness checks. Protected endpoints require the bearer token, and Swagger/ReDoc are disabled in production mode. Keep SQLite on a single application instance; use a managed database before deploying multiple API workers.
+
+Run the regression checks with:
+
+```powershell
+python -m unittest discover -s tests -v
+```

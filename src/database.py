@@ -80,20 +80,29 @@ def init_database(db_path=DEFAULT_DB_PATH):
 
 def store_features(df, db_path=DEFAULT_DB_PATH):
     """Bulk insert/replace the feature matrix into SQLite."""
-    conn = sqlite3.connect(db_path)
-    conn.execute("DELETE FROM user_daily_features")
-    df.to_sql("user_daily_features", conn, if_exists="append", index=False)
-    conn.commit()
-    conn.close()
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA busy_timeout = 5000")
+        conn.execute("DELETE FROM user_daily_features")
+        df.to_sql("user_daily_features", conn, if_exists="append", index=False)
 
 
 def store_threat_feed(df, db_path=DEFAULT_DB_PATH):
     """Bulk insert/replace the scored threat intelligence feed into SQLite."""
-    conn = sqlite3.connect(db_path)
-    conn.execute("DELETE FROM threat_intelligence")
-    df.to_sql("threat_intelligence", conn, if_exists="append", index=False)
-    conn.commit()
-    conn.close()
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA busy_timeout = 5000")
+        conn.execute("DELETE FROM threat_intelligence")
+        df.to_sql("threat_intelligence", conn, if_exists="append", index=False)
+
+
+def store_pipeline_results(features_df, threat_df, db_path=DEFAULT_DB_PATH):
+    """Replace both pipeline tables atomically as one result generation."""
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA busy_timeout = 5000")
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("DELETE FROM user_daily_features")
+        conn.execute("DELETE FROM threat_intelligence")
+        features_df.to_sql("user_daily_features", conn, if_exists="append", index=False)
+        threat_df.to_sql("threat_intelligence", conn, if_exists="append", index=False)
 
 
 # ── Query Functions ──────────────────────────────────────────────
